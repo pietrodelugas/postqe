@@ -11,6 +11,7 @@
 
 import numpy as np
 import h5py
+from scipy.io import FortranFile
 from .plot import plot_1Dcharge, plot_2Dcharge, plot_3Dcharge
 from .compute_vs import compute_G, compute_v_bare, compute_v_h, compute_v_xc
 
@@ -18,24 +19,67 @@ def read_charge_file_hdf5(filename ):
     """
     Reads a PW charge file in HDF5 format. 
     :param filename: 
-    :param nr: 
     :return: a dictionary describing the content of file 
         keys=[nr, ngm_g, gamma_only, rhog_, MillerIndexes]
     """
     with h5py.File(filename, "r") as h5f:
-        MI = h5f.get('MillerIndices')[:]
+        MI = h5f.get('MillerIndices')
         nr1 = 2*max(abs(MI[:,0]))+1
         nr2 = 2*max(abs(MI[:,1]))+1
         nr3 = 2*max(abs(MI[:,2]))+1
         nr = np.array([nr1,nr2,nr3])
         res = dict(h5f.attrs.items())
-        res.update({'MillInd':MI,'nr_min': nr})
+        res.update({'gamma_only': 'TRUE' in res.get('gamma_only','false').upper()})
+        res.update(dict(MI.attrs.items()))
+        res.update({'MillInd':MI[:],'nr_min': nr})
         rhog = h5f['rhotot_g'][:].reshape(res['ngm_g'],2).dot([1.e0,1.e0j])
         res.update({'rhotot_g':rhog})
-        if 'rhodiff_g' in h5f.keys():
-            rhog = h5f['rhodiff_g'][:].reshape(res['ngm_g'],2).dot([1.e0,1.e0j])
-            res.update({'rhodiff_g':rhog})
+        vol = res['bg1'].dot(np.cross(res['bg2'],res['bg3']))
+        at1 = 2.e0*np.pi * np.cross(res['bg2'],res['bg3'])/vol
+        at2 = 2.e0 * np.pi * np.cross(res['bg3'], res['bg1'])/vol
+        at3 = 2.e0 * np.pi * np.cross(res['bg1'], res['bg2'])/vol
+        res.update({'at1':at1,'at2':at2,'at3':at3})
+        dsets = {'rhotot':'rhotot_g', 'rhodiff':'rhodiff_g', 'm_x':'m_x', 'm_y':'m_y', 'm_z':'m_z'}
+        for t in dsets.items():
+            if t[1] in h5f.keys():
+                rhog = h5f[t[1]][:].reshape(res['ngm_g'],2).dot([1.e0,1.e0j])
+                res.update({t[0]:rhog})
         return res
+
+
+def read_charge_file_dat(filename):
+    """
+    Reads a PW charge file writter as fortran unformatted binary 
+    :param filename: 
+    :return: a dictionary describing the content of the file
+        keys=[nr, ngm, gamma_only, density data in g space ( rhog's), MillerIndexes] 
+    """
+    with FortranFile(filename, 'r') as ff:
+        gamma_only, ngm, ispin = ff.read_record([('g_o','<i4'),('ngm','<i4'),('ispin','<i4')])[0]
+        res={'gamma_only' : bool(gamma_only), 'ngm_g':ngm, 'nspin':ispin}
+        bg = ff.read_record([('bg','<f8',(3,3))])[0][0]
+        res.update({'bg1':bg[0,:], 'bg2' : bg[1,:], 'bg3': bg[2,:] })
+        vol = res['bg1'].dot(np.cross(res['bg2'],res['bg3']))
+        at1 = 2.e0 * np.pi * np.cross(res['bg2'], res['bg3']) / vol
+        at2 = 2.e0 * np.pi * np.cross(res['bg3'], res['bg1']) / vol
+        at3 = 2.e0 * np.pi * np.cross(res['bg1'], res['bg2']) / vol
+        res.update({'at1': at1, 'at2': at2, 'at3': at3})
+        MI = ff.read_record([('mi', '<i4', (3*ngm,))])[0][0]
+        MI = MI.reshape((ngm,3),order='C')
+        nr1 = 2*max(abs(MI[:,0]))+1
+        nr2 = 2*max(abs(MI[:,1]))+1
+        nr3 = 2*max(abs(MI[:,2]))+1
+        res.update({'MillInd':MI,'nr_min':(nr1,nr2,nr3)})
+        dsets = ['rhotot']
+        if ispin == 2:
+            dsets += 'rhodiff'
+        if ispin == 4:
+            dsets += ['m_x','m_y','m_z']
+        for d in dsets:
+            data = ff.read_record([('rhog','<f8',(2*ngm))])[0][0]
+            rhog = data.reshape(ngm,2).dot([1.e0,1.e0j])
+            res.update({d:rhog})
+    return res
 
 def get_minus_indexes(g1,g2,g3):
     """
@@ -71,6 +115,28 @@ def get_minus_indexes(g1,g2,g3):
     res = np.array(vector_func(g1,g2,g3))
     return res.transpose()
 
+
+def fill_rho(g1, g2, g3, rhogs, rho):
+    """
+    wrapper for the vectorize the filling fft grid loop with data provided by rhogs and 
+    positions provided with the correspoding Mill iller indices g1,g2,g3
+    :param g1: vectort with first miller index 
+    :param g2: vector  with second miller index
+    :param g3:              3-rd miller index 
+    :param rhogs:  vector with  data 
+    :param rho:    fft grid to be filled 
+    :return: 
+    """
+    def scalar_func (i,j,k, rhog ):
+        try:
+            rho[i,j,k] = rhog
+        except IndexError:
+            pass
+
+    vector_func = np.vectorize(scalar_func)
+    vector_func(g1, g2, g3, rhogs )
+    return 1
+
 def get_charge_r(filename, nr = None):
     """
     Reads a charge file written with QE in HDF5 format. *nr = [nr1,nr2,nr3]* (the dimensions of
@@ -83,7 +149,7 @@ def get_charge_r(filename, nr = None):
 
     cdata = read_charge_file_hdf5(filename)
     if nr is None:
-        nr1,nr2,nr3 = cdata['nrmin']
+        nr1,nr2,nr3 = cdata['nr_    min']
     else:
         nr1,nr2,nr3 = nr
     gamma_only = 'TRUE' in str(cdata['gamma_only']).upper()
@@ -134,7 +200,7 @@ def write_charge(filename, charge, header):
 
     fout = open(filename, "w")
 
-    # The header contains some information on the system, the grid nr, etc.
+    # The header contains some information on the system, the grid   nr, etc.
     fout.write(header)
     nr = charge.shape
     count = 0
@@ -149,8 +215,33 @@ def write_charge(filename, charge, header):
 
     fout.close()
 
+class gData:
+    """
+    A class 3D data fourier components below cutoff. Main data are the components array
+     ordered for increasing g-vector norm and the MillerIndices ordered samewise. 
+    """
+    def __init__(self,datalabel, **kwargs):
+        self.setvars(self, datalabel, **kwargs)
+        self.setlabel(kwargs.get('label',datalabel))
+
+    def setvars (self, datalabel, **kwargs):
+        self.attrs = {'datalabel':datalabel}
+        self.attrs.update({'gamma_only': 'TRUE' in str(kwargs.get('gamma_only')).upper(),
+                           'ngm_g': kwargs.get('ngm_g'),
+                           'nr_min': kwargs.get('nr_min'),
+                           'bg': np.array([kwargs.get('bg1'), kwargs.get('bg2'), kwargs.get('bg3')])
+                           }        )
+        self.rhog = kwargs['rhotot_g']
+        self.millidx = kwargs['MillInd']
+        self.datag = kwargs[datalabel]
+
+    def setlabel (self, new_label):
+        self.__label__ = new_label
 
 
+
+
+        
 
 class Charge:
     """
