@@ -224,24 +224,7 @@ class gData:
         self.setvars(self, datalabel, **kwargs)
         self.setlabel(kwargs.get('label',datalabel))
 
-    def setvars (self, datalabel, **kwargs):
-        self.attrs = {'datalabel':datalabel}
-        self.attrs.update({'gamma_only': 'TRUE' in str(kwargs.get('gamma_only')).upper(),
-                           'ngm_g': kwargs.get('ngm_g'),
-                           'nr_min': kwargs.get('nr_min'),
-                           'bg': np.array([kwargs.get('bg1'), kwargs.get('bg2'), kwargs.get('bg3')])
-                           }        )
-        self.rhog = kwargs['rhotot_g']
-        self.millidx = kwargs['MillInd']
-        self.datag = kwargs[datalabel]
 
-    def setlabel (self, new_label):
-        self.__label__ = new_label
-
-
-
-
-        
 
 class Charge:
     """
